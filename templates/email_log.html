@@ -584,7 +584,14 @@
                 this.searchForm.end_date = this.formatDate(today);
                 this.searchForm.start_date = this.formatDate(lastMonth);
 
-                // 如果有保存的授权码，自动验证
+                // 优先从URL参数获取授权码
+                const urlParams = new URLSearchParams(window.location.search);
+                const urlAuthCode = urlParams.get('auth_code');
+                if (urlAuthCode) {
+                    this.authCode = urlAuthCode;
+                }
+
+                // 如果有授权码，自动验证
                 if (this.authCode) {
                     this.doAuth();
                 }
