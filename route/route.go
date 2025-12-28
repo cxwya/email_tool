@@ -11,9 +11,18 @@ func InitRouter(e *gin.Engine) {
 	e.NoRoute(func(context *gin.Context) {
 		response_helper.Common(context, 404, "路由不存在")
 	})
+
+	// 邮件记录首页
+	e.GET("/", common.EmailLogIndex)
+
 	api := e.Group("/api")
 	api.GET("/test", common.Test)
 	api.Any("/email", common.Email)
+
+	// 邮件记录API
+	api.POST("/getEmailLogList", common.GetEmailLogList)
+	api.POST("/deleteEmailLog", common.DeleteEmailLog)
+
 	//登录相关
 	auth := api.Group("", middleware.Auth())
 	auth.POST("/test_auth", common.Test)

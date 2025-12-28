@@ -37,6 +37,7 @@ func InitApp(initTypes ...string) {
 			}
 			db.AutoMigrate(
 				&model.User{},
+				&model.EmailLog{},
 			)
 		}
 	}

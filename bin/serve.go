@@ -29,6 +29,9 @@ func StartServer() {
 	//gin.DefaultWriter = ioutil.Discard
 
 	engine := gin.Default()
+	// 加载HTML模板（使用不同的分隔符避免与Vue冲突）
+	engine.Delims("{[", "]}")
+	engine.LoadHTMLGlob("templates/*")
 	//初始化中间件
 	middleware.InitMiddleware(engine)
 	//初始化路由

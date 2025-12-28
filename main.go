@@ -10,7 +10,11 @@ import (
 
 func init() {
 	//项目初始化
-	app.InitApp(app.InitTypeBase, app.InitTypeCron)
+	app.InitApp(
+		app.InitTypeBase,
+		app.InitTypeCron,
+		app.InitTypeMigrate,
+	)
 }
 
 func main() {
