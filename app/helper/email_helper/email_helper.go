@@ -2,12 +2,14 @@ package email_helper
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
-	"mime" // 新增：用于对邮件头部中的中文字符进行 Base64 编码
+	"mime"
 	"net/smtp"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // EmailConfig SMTP 配置
@@ -37,17 +39,19 @@ type EmailResult struct {
 
 // GetDefaultConfig 从环境变量获取默认配置
 func GetDefaultConfig() EmailConfig {
-	port, _ := strconv.Atoi(os.Getenv("SMTP_PORT"))
+	portStr := strings.TrimSpace(os.Getenv("SMTP_PORT"))
+	port, _ := strconv.Atoi(portStr)
 	if port == 0 {
 		port = 587
 	}
 	return EmailConfig{
-		Host:     os.Getenv("SMTP_HOST"),
+		// 使用 TrimSpace 彻底清除环境变量中可能存在的 \r 等隐藏空白符
+		Host:     strings.TrimSpace(os.Getenv("SMTP_HOST")),
 		Port:     port,
-		Username: os.Getenv("SMTP_USERNAME"),
-		Password: os.Getenv("SMTP_PASSWORD"),
-		From:     os.Getenv("SMTP_FROM"),
-		FromName: os.Getenv("SMTP_FROM_NAME"),
+		Username: strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
+		Password: strings.TrimSpace(os.Getenv("SMTP_PASSWORD")),
+		From:     strings.TrimSpace(os.Getenv("SMTP_FROM")),
+		FromName: strings.TrimSpace(os.Getenv("SMTP_FROM_NAME")),
 	}
 }
 
@@ -62,15 +66,22 @@ func SendEmail(config EmailConfig, message EmailMessage) EmailResult {
 
 	var msgBuilder strings.Builder
 
-	// 1. 补充 Date 字段 (严格的邮件网关强制要求)
+	// 1. 生成 Message-ID，防止部分严格服务器降级报文
+	hostname := "localhost"
+	if parts := strings.Split(config.Host, ":"); len(parts) > 0 && parts[0] != "" {
+		hostname = parts[0]
+	}
+	msgBuilder.WriteString(fmt.Sprintf("Message-ID: <%d@%s>\r\n", time.Now().UnixNano(), hostname))
 	msgBuilder.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format(time.RFC1123Z)))
 
 	// 2. 发件人
-	if config.FromName != "" {
-		encodedFromName := mime.BEncoding.Encode("UTF-8", config.FromName)
-		msgBuilder.WriteString(fmt.Sprintf("From: %s <%s>\r\n", encodedFromName, config.From))
+	fromName := strings.TrimSpace(config.FromName)
+	from := strings.TrimSpace(config.From)
+	if fromName != "" {
+		encodedFromName := mime.BEncoding.Encode("UTF-8", fromName)
+		msgBuilder.WriteString(fmt.Sprintf("From: %s <%s>\r\n", encodedFromName, from))
 	} else {
-		msgBuilder.WriteString(fmt.Sprintf("From: %s\r\n", config.From))
+		msgBuilder.WriteString(fmt.Sprintf("From: %s\r\n", from))
 	}
 
 	// 3. 收件人
@@ -82,24 +93,25 @@ func SendEmail(config EmailConfig, message EmailMessage) EmailResult {
 	}
 
 	// 5. 邮件主题
-	encodedSubject := mime.BEncoding.Encode("UTF-8", message.Subject)
+	subject := strings.TrimSpace(message.Subject)
+	encodedSubject := mime.BEncoding.Encode("UTF-8", subject)
 	msgBuilder.WriteString(fmt.Sprintf("Subject: %s\r\n", encodedSubject))
 
 	// 6. MIME 版本与类型
 	msgBuilder.WriteString("MIME-Version: 1.0\r\n")
 	if message.IsHTML {
-		msgBuilder.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+		msgBuilder.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
 	} else {
-		msgBuilder.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+		msgBuilder.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
 	}
 
-	// 7. 声明传输编码 (非常关键：防止因为正文的中文8bit字符导致报文被服务器强行降级打包)
+	// 7. 声明 Base64 传输编码
 	msgBuilder.WriteString("Content-Transfer-Encoding: base64\r\n")
 
-	// 8. 空行，严格分隔 Header 与 Body
+	// 8. 严格的且唯一的空行分隔符
 	msgBuilder.WriteString("\r\n")
 
-	// 9. 将正文进行 Base64 编码，并按 RFC 规范每 76 个字符进行换行
+	// 9. 正文 Base64 编码分块，每 76 个字符进行换行
 	encodedBody := base64.StdEncoding.EncodeToString([]byte(message.Body))
 	for i := 0; i < len(encodedBody); i += 76 {
 		end := i + 76
@@ -109,19 +121,15 @@ func SendEmail(config EmailConfig, message EmailMessage) EmailResult {
 		msgBuilder.WriteString(encodedBody[i:end] + "\r\n")
 	}
 
-	// 合并所有收件人
 	allRecipients := append(message.To, message.Cc...)
-
-	// 连接 SMTP 服务器
 	addr := fmt.Sprintf("%s:%d", config.Host, config.Port)
 	auth := smtp.PlainAuth("", config.Username, config.Password, config.Host)
 
-	// 发送邮件
 	var err error
 	if config.Port == 465 {
-		err = sendMailWithSSL(addr, auth, config.From, allRecipients, []byte(msgBuilder.String()))
+		err = sendMailWithSSL(addr, auth, from, allRecipients, []byte(msgBuilder.String()))
 	} else {
-		err = smtp.SendMail(addr, auth, config.From, allRecipients, []byte(msgBuilder.String()))
+		err = smtp.SendMail(addr, auth, from, allRecipients, []byte(msgBuilder.String()))
 	}
 
 	if err != nil {
