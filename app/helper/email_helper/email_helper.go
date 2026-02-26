@@ -60,31 +60,32 @@ func SendEmail(config EmailConfig, message EmailMessage) EmailResult {
 		return EmailResult{Success: false, Error: "收件人不能为空"}
 	}
 
-	// 构建邮件内容：废弃 map，按严格的 SMTP 标准顺序拼接
 	var msgBuilder strings.Builder
 
-	// 1. 发件人 (处理中文昵称乱码和规范问题)
+	// 1. 补充 Date 字段 (严格的邮件网关强制要求)
+	msgBuilder.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format(time.RFC1123Z)))
+
+	// 2. 发件人
 	if config.FromName != "" {
-		// 使用 mime.BEncoding 进行 RFC 2047 编码
 		encodedFromName := mime.BEncoding.Encode("UTF-8", config.FromName)
 		msgBuilder.WriteString(fmt.Sprintf("From: %s <%s>\r\n", encodedFromName, config.From))
 	} else {
 		msgBuilder.WriteString(fmt.Sprintf("From: %s\r\n", config.From))
 	}
 
-	// 2. 收件人
+	// 3. 收件人
 	msgBuilder.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(message.To, ",")))
 
-	// 3. 抄送人
+	// 4. 抄送人
 	if len(message.Cc) > 0 {
 		msgBuilder.WriteString(fmt.Sprintf("Cc: %s\r\n", strings.Join(message.Cc, ",")))
 	}
 
-	// 4. 邮件主题 (处理中文主题乱码，这是防止解析崩溃的关键)
+	// 5. 邮件主题
 	encodedSubject := mime.BEncoding.Encode("UTF-8", message.Subject)
 	msgBuilder.WriteString(fmt.Sprintf("Subject: %s\r\n", encodedSubject))
 
-	// 5. MIME 协议版本及格式
+	// 6. MIME 版本与类型
 	msgBuilder.WriteString("MIME-Version: 1.0\r\n")
 	if message.IsHTML {
 		msgBuilder.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
@@ -92,28 +93,34 @@ func SendEmail(config EmailConfig, message EmailMessage) EmailResult {
 		msgBuilder.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
 	}
 
-	// 6. 邮件头和正文的严格分隔符 (连续的 \r\n\r\n，因为上一行结尾有一个，这里再加一个)
+	// 7. 声明传输编码 (非常关键：防止因为正文的中文8bit字符导致报文被服务器强行降级打包)
+	msgBuilder.WriteString("Content-Transfer-Encoding: base64\r\n")
+
+	// 8. 空行，严格分隔 Header 与 Body
 	msgBuilder.WriteString("\r\n")
-	
-	// 7. 邮件正文
-	msgBuilder.WriteString(message.Body)
+
+	// 9. 将正文进行 Base64 编码，并按 RFC 规范每 76 个字符进行换行
+	encodedBody := base64.StdEncoding.EncodeToString([]byte(message.Body))
+	for i := 0; i < len(encodedBody); i += 76 {
+		end := i + 76
+		if end > len(encodedBody) {
+			end = len(encodedBody)
+		}
+		msgBuilder.WriteString(encodedBody[i:end] + "\r\n")
+	}
 
 	// 合并所有收件人
 	allRecipients := append(message.To, message.Cc...)
 
 	// 连接 SMTP 服务器
 	addr := fmt.Sprintf("%s:%d", config.Host, config.Port)
-
-	// 认证
 	auth := smtp.PlainAuth("", config.Username, config.Password, config.Host)
 
-	// 根据端口选择连接方式
+	// 发送邮件
 	var err error
 	if config.Port == 465 {
-		// SSL 连接
 		err = sendMailWithSSL(addr, auth, config.From, allRecipients, []byte(msgBuilder.String()))
 	} else {
-		// TLS 或普通连接 (587, 25)
 		err = smtp.SendMail(addr, auth, config.From, allRecipients, []byte(msgBuilder.String()))
 	}
 
