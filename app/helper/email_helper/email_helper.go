@@ -1,6 +1,7 @@
 package email_helper
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -45,7 +46,6 @@ func GetDefaultConfig() EmailConfig {
 		port = 587
 	}
 	return EmailConfig{
-		// 使用 TrimSpace 彻底清除环境变量中可能存在的 \r 等隐藏空白符
 		Host:     strings.TrimSpace(os.Getenv("SMTP_HOST")),
 		Port:     port,
 		Username: strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
@@ -53,6 +53,11 @@ func GetDefaultConfig() EmailConfig {
 		From:     strings.TrimSpace(os.Getenv("SMTP_FROM")),
 		FromName: strings.TrimSpace(os.Getenv("SMTP_FROM_NAME")),
 	}
+}
+
+// cleanHeader 彻底清除导致 Header 截断的非法换行符（修复核心）
+func cleanHeader(in string) string {
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(in, "\r", ""), "\n", ""))
 }
 
 // SendEmail 发送邮件
@@ -64,72 +69,71 @@ func SendEmail(config EmailConfig, message EmailMessage) EmailResult {
 		return EmailResult{Success: false, Error: "收件人不能为空"}
 	}
 
-	var msgBuilder strings.Builder
+	var buf bytes.Buffer
 
-	// 1. 生成 Message-ID，防止部分严格服务器降级报文
+	// Go 底层 smtp.Data() 会自动把 \n 转换为规范的 \r\n，手动写 \r\n 遇到特殊环境会变成 \r\r\n 导致信头破裂
 	hostname := "localhost"
 	if parts := strings.Split(config.Host, ":"); len(parts) > 0 && parts[0] != "" {
 		hostname = parts[0]
 	}
-	msgBuilder.WriteString(fmt.Sprintf("Message-ID: <%d@%s>\r\n", time.Now().UnixNano(), hostname))
-	msgBuilder.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format(time.RFC1123Z)))
+	buf.WriteString(fmt.Sprintf("Message-ID: <%d@%s>\n", time.Now().UnixNano(), hostname))
+	buf.WriteString(fmt.Sprintf("Date: %s\n", time.Now().Format(time.RFC1123Z)))
 
-	// 2. 发件人
-	fromName := strings.TrimSpace(config.FromName)
-	from := strings.TrimSpace(config.From)
+	fromName := cleanHeader(config.FromName)
+	fromEmail := cleanHeader(config.From)
 	if fromName != "" {
-		encodedFromName := mime.BEncoding.Encode("UTF-8", fromName)
-		msgBuilder.WriteString(fmt.Sprintf("From: %s <%s>\r\n", encodedFromName, from))
+		buf.WriteString(fmt.Sprintf("From: %s <%s>\n", mime.BEncoding.Encode("UTF-8", fromName), fromEmail))
 	} else {
-		msgBuilder.WriteString(fmt.Sprintf("From: %s\r\n", from))
+		buf.WriteString(fmt.Sprintf("From: %s\n", fromEmail))
 	}
 
-	// 3. 收件人
-	msgBuilder.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(message.To, ",")))
+	var cleanTo []string
+	for _, to := range message.To {
+		cleanTo = append(cleanTo, cleanHeader(to))
+	}
+	buf.WriteString(fmt.Sprintf("To: %s\n", strings.Join(cleanTo, ",")))
 
-	// 4. 抄送人
 	if len(message.Cc) > 0 {
-		msgBuilder.WriteString(fmt.Sprintf("Cc: %s\r\n", strings.Join(message.Cc, ",")))
+		var cleanCc []string
+		for _, cc := range message.Cc {
+			cleanCc = append(cleanCc, cleanHeader(cc))
+		}
+		buf.WriteString(fmt.Sprintf("Cc: %s\n", strings.Join(cleanCc, ",")))
 	}
 
-	// 5. 邮件主题
-	subject := strings.TrimSpace(message.Subject)
-	encodedSubject := mime.BEncoding.Encode("UTF-8", subject)
-	msgBuilder.WriteString(fmt.Sprintf("Subject: %s\r\n", encodedSubject))
+	buf.WriteString(fmt.Sprintf("Subject: %s\n", mime.BEncoding.Encode("UTF-8", cleanHeader(message.Subject))))
+	buf.WriteString("MIME-Version: 1.0\n")
 
-	// 6. MIME 版本与类型
-	msgBuilder.WriteString("MIME-Version: 1.0\r\n")
 	if message.IsHTML {
-		msgBuilder.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
+		buf.WriteString("Content-Type: text/html; charset=\"UTF-8\"\n")
 	} else {
-		msgBuilder.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
+		buf.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\n")
 	}
 
-	// 7. 声明 Base64 传输编码
-	msgBuilder.WriteString("Content-Transfer-Encoding: base64\r\n")
+	buf.WriteString("Content-Transfer-Encoding: base64\n")
 
-	// 8. 严格的且唯一的空行分隔符
-	msgBuilder.WriteString("\r\n")
+	// 唯一的空行，严格分隔 Header 和 Body
+	buf.WriteString("\n")
 
-	// 9. 正文 Base64 编码分块，每 76 个字符进行换行
+	// Body Base64 每 76 字符换行
 	encodedBody := base64.StdEncoding.EncodeToString([]byte(message.Body))
 	for i := 0; i < len(encodedBody); i += 76 {
 		end := i + 76
 		if end > len(encodedBody) {
 			end = len(encodedBody)
 		}
-		msgBuilder.WriteString(encodedBody[i:end] + "\r\n")
+		buf.WriteString(encodedBody[i:end] + "\n")
 	}
 
-	allRecipients := append(message.To, message.Cc...)
+	allRecipients := append(cleanTo, message.Cc...)
 	addr := fmt.Sprintf("%s:%d", config.Host, config.Port)
 	auth := smtp.PlainAuth("", config.Username, config.Password, config.Host)
 
 	var err error
 	if config.Port == 465 {
-		err = sendMailWithSSL(addr, auth, from, allRecipients, []byte(msgBuilder.String()))
+		err = sendMailWithSSL(addr, auth, fromEmail, allRecipients, buf.Bytes())
 	} else {
-		err = smtp.SendMail(addr, auth, from, allRecipients, []byte(msgBuilder.String()))
+		err = smtp.SendMail(addr, auth, fromEmail, allRecipients, buf.Bytes())
 	}
 
 	if err != nil {
